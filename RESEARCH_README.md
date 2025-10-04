@@ -5,16 +5,19 @@
 This implementation introduces **three novel techniques** for efficient neural network quantization using sensitivity analysis:
 
 ### **1. Mixed-Precision Quantization (MPQ)**
+
 - **Innovation**: Layer-specific bit-width allocation based on Fisher Information sensitivity
 - **Key Insight**: High-sensitivity layers get more bits (6-8 bit), low-sensitivity layers get fewer bits (2-3 bit)
 - **Result**: Better accuracy-compression tradeoff than uniform quantization
 
 ### **2. Sensitivity-Guided Resource Allocation (SGRA)**
+
 - **Innovation**: Adaptive training resources (epochs, learning rates, patience) per layer
 - **Key Insight**: Sensitive layers need more training time and careful optimization
 - **Result**: Improved training efficiency and model quality
 
 ### **3. Quantization Budget Optimization (QBO)**
+
 - **Innovation**: Fixed model size constraint with optimal bit allocation
 - **Key Insight**: Given a target size, allocate bits to maximize quality
 - **Result**: Predictable model sizes with maximized performance
@@ -23,14 +26,14 @@ This implementation introduces **three novel techniques** for efficient neural n
 
 ## 🎯 Key Advantages Over Baseline
 
-| Metric | Baseline EfficientQAT | Our Approach (MPQ+SGRA) |
-|--------|----------------------|------------------------|
-| **Bit-width** | 4-bit uniform | 2-8 bit mixed |
-| **Compression** | 4.0x (fixed) | 4.5-6.0x (variable) |
-| **Training** | 2 epochs/layer (fixed) | 2-4 epochs (adaptive) |
-| **Accuracy** | Baseline | +1-3% absolute |
-| **Efficiency** | Baseline | 15-20% faster training |
-| **Flexibility** | None | Target size/quality tradeoff |
+| Metric          | Baseline EfficientQAT  | Our Approach (MPQ+SGRA)      |
+| --------------- | ---------------------- | ---------------------------- |
+| **Bit-width**   | 4-bit uniform          | 2-8 bit mixed                |
+| **Compression** | 4.0x (fixed)           | 4.5-6.0x (variable)          |
+| **Training**    | 2 epochs/layer (fixed) | 2-4 epochs (adaptive)        |
+| **Accuracy**    | Baseline               | +1-3% absolute               |
+| **Efficiency**  | Baseline               | 15-20% faster training       |
+| **Flexibility** | None                   | Target size/quality tradeoff |
 
 ---
 
@@ -50,6 +53,7 @@ python main_research.py \
 ```
 
 **Expected Results:**
+
 ```
 Baseline (4-bit uniform):
   Perplexity: ~10.5
@@ -80,6 +84,7 @@ python main_research.py \
 ```
 
 **Expected Results:**
+
 ```
 Baseline (fixed training):
   Perplexity: ~10.5
@@ -107,6 +112,7 @@ python main_research.py \
 ```
 
 **Expected Results:**
+
 ```
 Baseline (4-bit, 3.5 GB):
   Perplexity: ~10.5
@@ -136,6 +142,7 @@ python main_research.py \
 ```
 
 **Expected Results (Best Configuration):**
+
 ```
 Baseline (4-bit, 3.5 GB):
   Perplexity: ~10.5
@@ -149,7 +156,7 @@ Our Combined (MPQ+SGRA, avg 3.5 bits):
   Model Size: 3.1 GB (12% smaller)
   Training Time: 28 min (7% faster)
   Compression: 4.5x vs FP16
-  
+
 KEY INSIGHT: Similar accuracy with smaller size and faster training!
 ```
 
@@ -264,7 +271,7 @@ Output: Quantized model M_q
 2. Allocate bit-widths: B = allocate_bits(S_norm, B_target, strategy)
 3. For each layer i in M:
    a. Get layer config: b_i = B[i], g_i = group_size(S_norm[i])
-   b. Calculate training config: 
+   b. Calculate training config:
       - epochs_i = base_epochs * (1 + S_norm[i])
       - lr_i = base_lr * (1 + 0.5*(S_norm[i] - 0.5))
       - patience_i = adaptive_patience(S_norm[i])
@@ -276,6 +283,7 @@ Output: Quantized model M_q
 ### 2. **Comprehensive Statistics**
 
 All experiments automatically save:
+
 - `layer_statistics.json`: Per-layer metrics (sensitivity, bits, loss, time)
 - `results.json`: Final model metrics (PPL, accuracy, size, compression)
 - Logs with detailed training progress
@@ -303,14 +311,14 @@ python main_research.py \
 ### Abstract Template
 
 ```
-We propose Sensitivity-Guided Mixed-Precision Quantization (MPQ+SGRA), 
-a novel approach that leverages layer-wise sensitivity analysis to 
-optimize both quantization configuration and training resources. Our 
-method introduces three key innovations: (1) Fisher Information-based 
-mixed-precision allocation, (2) adaptive training resource scheduling, 
-and (3) budget-constrained optimization. Experiments on Llama-2-7B 
-show that our approach achieves 1-3% higher accuracy than uniform 
-4-bit quantization while maintaining similar or smaller model sizes, 
+We propose Sensitivity-Guided Mixed-Precision Quantization (MPQ+SGRA),
+a novel approach that leverages layer-wise sensitivity analysis to
+optimize both quantization configuration and training resources. Our
+method introduces three key innovations: (1) Fisher Information-based
+mixed-precision allocation, (2) adaptive training resource scheduling,
+and (3) budget-constrained optimization. Experiments on Llama-2-7B
+show that our approach achieves 1-3% higher accuracy than uniform
+4-bit quantization while maintaining similar or smaller model sizes,
 with 15-20% faster training.
 ```
 
@@ -420,6 +428,7 @@ print(f"Total training time: {stats['total_training_time']/60:.1f} min")
 ## 📊 Expected Conference/Journal
 
 **Suitable Venues:**
+
 - NeurIPS (Systems/Optimization track)
 - ICML (Efficient ML track)
 - ICLR (Representation Learning)
@@ -427,6 +436,7 @@ print(f"Total training time: {stats['total_training_time']/60:.1f} min")
 - MLSys (Systems for ML)
 
 **Target Metrics for Acceptance:**
+
 - Novel contribution: ✅ 3 new techniques
 - Strong baselines: ✅ Comparison with EfficientQAT, GPTQ, AWQ
 - Comprehensive evaluation: ✅ Multiple models, datasets, tasks
@@ -434,5 +444,3 @@ print(f"Total training time: {stats['total_training_time']/60:.1f} min")
 - Practical impact: ✅ 1-3% accuracy gain, 15-20% speedup
 
 Good luck with your publication! 🚀
-
-
