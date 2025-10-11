@@ -126,13 +126,13 @@ class QuantLinear(nn.Module, TritonModuleMixin):
         row = 0
         qweight = np.zeros((math.ceil(intweight.shape[0]/(32//self.bits)), intweight.shape[1]), dtype=np.uint32)
         while row < qweight.shape[0]:
-            if self.bits in [2, 3, 4, 8]:
+            if self.bits in [2, 3, 4, 5, 6, 8]:
                 for j in range(i, min(i + (32 // self.bits), intweight.shape[0])):
                     qweight[row] |= intweight[j] << (self.bits * (j - i))
                 i += 32 // self.bits
                 row += 1
             else:
-                raise NotImplementedError("Only 2,3,4,8 bits are supported.")
+                raise NotImplementedError("Only 2,3,4,5,6,8 bits are supported.")
 
         qweight = qweight.astype(np.int32)
         self.qweight = torch.from_numpy(qweight)
@@ -143,13 +143,13 @@ class QuantLinear(nn.Module, TritonModuleMixin):
         i = 0
         col = 0
         while col < qzeros.shape[1]:
-            if self.bits in [2, 3, 4, 8]:
+            if self.bits in [2, 3, 4, 5, 6, 8]:
                 for j in range(i, min(i + (32 // self.bits), zeros.shape[1])):
                     qzeros[:, col] |= zeros[:, j] << (self.bits * (j - i))
                 i += 32 // self.bits
                 col += 1
             else:
-                raise NotImplementedError("Only 2,3,4,8 bits are supported.")
+                raise NotImplementedError("Only 2,3,4,5,6,8 bits are supported.")
                 
         qzeros = qzeros.astype(np.int32)
         self.qzeros = torch.from_numpy(qzeros)
@@ -197,4 +197,143 @@ def load_quantized_model(model_path, wbits, group_size):
 
     return model, tokenizer
 
-__all__ = ["QuantLinear","load_omniq_quantized"]
+
+def load_mixed_precision_quantized_model(model_path):
+    """
+    Load a mixed-precision quantized model where different layers may have different bit-widths.
+    This function reads the per-layer bit-widths and group sizes from the saved checkpoint.
+    
+    Args:
+        model_path: Path to the saved mixed-precision quantized model
+        
+    Returns:
+        model: Loaded model with per-layer quantization configurations
+        tokenizer: Loaded tokenizer
+    """
+    import os
+    print(f"Loading mixed-precision quantized model from {model_path}")
+    
+    tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=False)
+    config = AutoConfig.from_pretrained(model_path)
+    
+    # Load state dict to inspect per-layer configurations
+    state_dict_path = os.path.join(model_path, "pytorch_model.bin")
+    if not os.path.exists(state_dict_path):
+        # Try safetensors format
+        state_dict_path = os.path.join(model_path, "model.safetensors")
+        if os.path.exists(state_dict_path):
+            from safetensors.torch import load_file
+            state_dict = load_file(state_dict_path)
+        else:
+            # Try sharded checkpoints
+            from transformers.modeling_utils import load_sharded_checkpoint
+            state_dict, _ = load_sharded_checkpoint(model_path)
+    else:
+        state_dict = torch.load(state_dict_path, map_location='cpu')
+    
+    # Extract per-layer bit-widths and group sizes from state dict
+    layer_configs = {}
+    for key in state_dict.keys():
+        # Look for qweight keys to identify quantized layers
+        # Format: model.layers.{layer_idx}.{submodule}.{linear_name}.qweight
+        if 'qweight' in key:
+            parts = key.split('.')
+            if 'layers' in parts:
+                layer_idx = int(parts[parts.index('layers') + 1])
+                if layer_idx not in layer_configs:
+                    layer_configs[layer_idx] = {}
+                
+                # Get the module path (e.g., "self_attn.q_proj")
+                module_path_parts = []
+                start_collecting = False
+                for i, part in enumerate(parts):
+                    if start_collecting and part not in ['qweight', 'scales', 'qzeros', 'g_idx', 'bias']:
+                        module_path_parts.append(part)
+                    if part == parts[parts.index('layers') + 1]:  # After layer index
+                        start_collecting = True
+                module_path = '.'.join(module_path_parts)
+                
+                # Infer bits from qweight shape
+                # qweight shape: (math.ceil(infeatures / (32 // bits)), outfeatures)
+                qweight_shape = state_dict[key].shape
+                scales_key = key.replace('qweight', 'scales')
+                if scales_key in state_dict:
+                    scales_shape = state_dict[scales_key].shape
+                    # scales shape: (math.ceil(infeatures / group_size), outfeatures)
+                    infeatures_groups = scales_shape[0]
+                    qweight_rows = qweight_shape[0]
+                    
+                    # Calculate bits: qweight_rows = math.ceil(infeatures / (32 // bits))
+                    # Try common bit-widths: 2, 3, 4, 5, 6, 8
+                    for candidate_bits in [2, 3, 4, 5, 6, 8]:
+                        # Calculate what infeatures would be
+                        expected_infeatures = qweight_rows * (32 // candidate_bits)
+                        # Check if this matches with scales
+                        for candidate_gs in [64, 128, 256]:
+                            if infeatures_groups == math.ceil(expected_infeatures / candidate_gs):
+                                layer_configs[layer_idx][module_path] = {
+                                    'bits': candidate_bits,
+                                    'group_size': candidate_gs,
+                                    'infeatures': expected_infeatures,
+                                    'outfeatures': qweight_shape[1]
+                                }
+                                break
+                        if module_path in layer_configs[layer_idx]:
+                            break
+    
+    print(f"Detected configurations for {len(layer_configs)} layers")
+    if layer_configs:
+        bits_summary = {}
+        for layer_idx, modules in layer_configs.items():
+            for module_path, cfg in modules.items():
+                bits = cfg['bits']
+                bits_summary[bits] = bits_summary.get(bits, 0) + 1
+        print(f"Bit-width distribution: {bits_summary}")
+    
+    # Create model with empty weights
+    with init_empty_weights():
+        model = AutoModelForCausalLM.from_config(config=config, torch_dtype=torch.float16, trust_remote_code=True)
+    
+    # Replace Linear layers with QuantLinear using detected configurations
+    layers = model.model.layers
+    for i in tqdm(range(len(layers)), desc="Replacing with QuantLinear"):
+        layer = layers[i]
+        named_linears = get_named_linears(layer, torch.nn.Linear)
+        
+        for name, module in named_linears.items():
+            # Get configuration for this specific layer and module
+            if i in layer_configs and name in layer_configs[i]:
+                cfg = layer_configs[i][name]
+                wbits = cfg['bits']
+                group_size = cfg['group_size']
+                print(f"  Layer {i}.{name}: {wbits}-bit, group_size={group_size}")
+            else:
+                # Fallback to default if not found (shouldn't happen for properly saved models)
+                wbits = 4
+                group_size = 128
+                print(f"  Layer {i}.{name}: Using default {wbits}-bit, group_size={group_size} (config not found)")
+            
+            q_linear = QuantLinear(
+                wbits, 
+                group_size, 
+                module.in_features, 
+                module.out_features, 
+                not module.bias is None
+            )
+            q_linear.to(next(layer.parameters()).device)
+            set_op_by_name(layer, name, q_linear)
+    
+    torch.cuda.empty_cache()
+    gc.collect()
+    model.tie_weights()
+    
+    # Load checkpoint with proper device map
+    device_map = infer_auto_device_map(model)
+    print("Loading pre-computed quantized weights...")
+    load_checkpoint_in_model(model, checkpoint=model_path, device_map=device_map, offload_state_dict=True)
+    print("Mixed-precision quantized weights loaded successfully!")
+    
+    return model, tokenizer
+
+
+__all__ = ["QuantLinear", "load_quantized_model", "load_mixed_precision_quantized_model"]

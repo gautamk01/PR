@@ -40,6 +40,7 @@ import random
 import numpy as np
 import torch
 import time
+import json
 from datautils_block import get_loaders, test_ppl
 import torch.nn as nn
 from quantize.block_ap_research import block_ap  # Research version
@@ -47,7 +48,7 @@ from tqdm import tqdm
 import utils
 from pathlib import Path
 from transformers import AutoTokenizer, AutoConfig, AutoModelForCausalLM
-from quantize.int_linear_real import load_quantized_model
+from quantize.int_linear_real import load_quantized_model, load_mixed_precision_quantized_model
 from accelerate import infer_auto_device_map, dispatch_model
 
 
@@ -223,8 +224,34 @@ def main():
         logger.info(f"Setting net as {args.net}")
     
     if args.resume_quant:
-        model, tokenizer = load_quantized_model(
-            args.resume_quant, args.wbits, args.group_size)
+        # Check if this is a mixed-precision model by looking for layer_statistics
+        is_mixed_precision = False
+        # Try model directory first, then parent directory
+        stats_file = os.path.join(args.resume_quant, "layer_statistics.json")
+        if not os.path.exists(stats_file):
+            # Check parent directory (common structure: output_dir/model/)
+            parent_stats_file = os.path.join(os.path.dirname(args.resume_quant), "layer_statistics.json")
+            if os.path.exists(parent_stats_file):
+                stats_file = parent_stats_file
+        
+        if os.path.exists(stats_file):
+            logger.info(f"Found layer statistics: {stats_file}")
+            with open(stats_file, 'r') as f:
+                stats = json.load(f)
+                if 'layer_stats' in stats and len(stats['layer_stats']) > 0:
+                    # Check if layers have different bit widths
+                    bit_widths = [s['bit_width'] for s in stats['layer_stats']]
+                    if len(set(bit_widths)) > 1:
+                        is_mixed_precision = True
+                        logger.info(f"Detected mixed-precision model with bit-widths: {set(bit_widths)}")
+        
+        if is_mixed_precision:
+            logger.info("Loading mixed-precision quantized model...")
+            model, tokenizer = load_mixed_precision_quantized_model(args.resume_quant)
+        else:
+            logger.info("Loading uniform quantized model...")
+            model, tokenizer = load_quantized_model(
+                args.resume_quant, args.wbits, args.group_size)
         logger.info(
             f"memory footprint after loading quantized model: {torch.cuda.max_memory_allocated('cuda') / 1024**3:.2f}GiB")
     else:
@@ -292,7 +319,6 @@ def main():
     
     # Save results
     results_file = f"{args.output_dir}/results.json"
-    import json
     with open(results_file, 'w') as f:
         json.dump({
             'configuration': {

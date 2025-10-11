@@ -157,6 +157,9 @@ def _optimize_bit_budget_greedy(initial_bits, sensitivity, target_avg):
     max_iterations = len(bits) * 5
     iteration = 0
 
+    # Hardware constraint: 2, 3, 4, 5, 6, 8 bits supported
+    SUPPORTED_BITS = [2, 3, 4, 5, 6, 8]
+    
     while abs(current_avg - target_avg) > 0.05 and iteration < max_iterations:
         if current_avg > target_avg:
             # Reduce bits from least sensitive high-bit layers
@@ -167,7 +170,11 @@ def _optimize_bit_budget_greedy(initial_bits, sensitivity, target_avg):
                 break
             candidates.sort(key=lambda x: x[2])  # Sort by efficiency (ascending)
             idx = candidates[0][0]
-            bits[idx] = max(2, bits[idx] - 1)
+            # Find next lower supported bit-width
+            current = bits[idx]
+            lower_bits = [b for b in SUPPORTED_BITS if b < current]
+            if lower_bits:
+                bits[idx] = max(lower_bits)
         else:
             # Add bits to most sensitive low-bit layers
             # Metric: sensitivity per (bits + 1) (marginal benefit)
@@ -177,7 +184,11 @@ def _optimize_bit_budget_greedy(initial_bits, sensitivity, target_avg):
                 break
             candidates.sort(key=lambda x: -x[2])  # Sort by marginal benefit (descending)
             idx = candidates[0][0]
-            bits[idx] = min(8, bits[idx] + 1)
+            # Find next higher supported bit-width
+            current = bits[idx]
+            higher_bits = [b for b in SUPPORTED_BITS if b > current]
+            if higher_bits:
+                bits[idx] = min(higher_bits)
 
         current_avg = np.mean(bits)
         iteration += 1
@@ -726,19 +737,30 @@ def block_ap(
 
     # Save research statistics
     if hasattr(args, 'output_dir') and layer_stats:
+        stats_data = {
+            'layer_stats': layer_stats,
+            'average_bits': sum(s['bit_width'] for s in layer_stats) / len(layer_stats),
+            'total_training_time': sum(s['training_time'] for s in layer_stats),
+            'config': {
+                'use_mixed_precision': getattr(args, 'use_mixed_precision', False),
+                'use_adaptive_training': getattr(args, 'use_adaptive_training', False),
+                'mpq_strategy': getattr(args, 'mpq_strategy', 'adaptive'),
+            }
+        }
+        
+        # Save to output_dir
         stats_file = f"{args.output_dir}/layer_statistics.json"
         with open(stats_file, 'w') as f:
-            json.dump({
-                'layer_stats': layer_stats,
-                'average_bits': sum(s['bit_width'] for s in layer_stats) / len(layer_stats),
-                'total_training_time': sum(s['training_time'] for s in layer_stats),
-                'config': {
-                    'use_mixed_precision': getattr(args, 'use_mixed_precision', False),
-                    'use_adaptive_training': getattr(args, 'use_adaptive_training', False),
-                    'mpq_strategy': getattr(args, 'mpq_strategy', 'adaptive'),
-                }
-            }, f, indent=2)
+            json.dump(stats_data, f, indent=2)
         logger.info(f"[RESEARCH] Statistics saved to {stats_file}")
+        
+        # Also save to model directory if save_quant_dir is specified
+        if hasattr(args, 'save_quant_dir') and args.save_quant_dir:
+            os.makedirs(args.save_quant_dir, exist_ok=True)
+            model_stats_file = f"{args.save_quant_dir}/layer_statistics.json"
+            with open(model_stats_file, 'w') as f:
+                json.dump(stats_data, f, indent=2)
+            logger.info(f"[RESEARCH] Statistics also saved to {model_stats_file}")
 
     # delete cached dataset
     if args.off_load_to_disk:

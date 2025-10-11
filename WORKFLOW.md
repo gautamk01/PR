@@ -142,6 +142,7 @@ Block 23: Sensitivity = 1.08 (LOWEST)
 ## Key Benefits
 
 ### 1. **Efficient Resource Allocation**
+
 ```
 High Sensitivity Layers (Blocks 0, 1, 30, 31):
   - Get 2.3-2.5 epochs
@@ -155,6 +156,7 @@ Low Sensitivity Layers (Blocks 20-26):
 ```
 
 ### 2. **Stability Preservation**
+
 ```
 ✅ No gradient clipping (baseline approach)
 ✅ Baseline learning rates (quant_lr=1e-4, weight_lr=2e-5)
@@ -163,6 +165,7 @@ Low Sensitivity Layers (Blocks 20-26):
 ```
 
 ### 3. **Minimal Overhead**
+
 ```
 Training Time:
   - Baseline: 30 minutes (2 epochs × 32 layers)
@@ -285,21 +288,19 @@ EfficientQAT/
 ## Troubleshooting
 
 ### If you see NaN gradients:
+
 - Check learning rates (should be 1e-4 and 2e-5)
 - Check gradient clipping (should be disabled)
 - Check sensitivity file loading (should show scores)
 
 ### If perplexity is too high:
+
 - Increase train_size (try 256 or 512)
 - Check if adaptive_epochs is enabled
 - Verify model is loading correctly
 
 ### If training is too slow:
+
 - Reduce train_size (minimum 128)
 - Reduce batch_size
 - Disable adaptive_epochs for speed test
-
-
-
-
-

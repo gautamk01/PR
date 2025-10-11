@@ -418,3 +418,52 @@ If you need help:
 4. Review code comments in `block_ap_research.py`
 
 **Good luck with your publication! 🚀📊🎓**
+Perfect! I've fixed the code to properly handle mixed-precision model loading. Here's what I
+changed:
+
+✅ Changes Made:
+
+1.  **`quantize/int_linear_real.py`** - Added new loading function
+    • Created load_mixed_precision_quantized_model() that:
+    • Inspects the saved checkpoint to detect per-layer bit-widths and group sizes
+    • Creates QuantLinear modules with the correct per-layer configurations
+    • Automatically detects bit-width distribution (2, 3, 4, 5, 6, 8 bits)
+    • Works with pytorch_model.bin, safetensors, and sharded checkpoints
+
+2.  **`main_research.py`** - Smart model loading
+    • Added auto-detection for mixed-precision models by checking layer_statistics.json
+    • Automatically chooses the right loading function:
+    • load_mixed_precision_quantized_model() for mixed-precision models
+    • load_quantized_model() for uniform quantization models
+    • Added missing json import
+
+3.  **`eval_quantized.py`** - New standalone evaluation script
+    • Created a dedicated script for evaluating saved models later
+    • Auto-detects and displays mixed-precision configuration
+    • Shows bit-width distribution
+    • Supports both perplexity and task evaluation
+
+🎯 Your Current Command is Still Safe
+
+Your current command will work perfectly because evaluation happens immediately after
+training in the same process. The fixes ensure future evaluation runs will also work
+correctly.
+
+📋 Usage Examples:
+
+Evaluate a saved mixed-precision model later:
+
+bash
+python eval_quantized.py \
+ --model_path ./output/mpq_adaptive/model \
+ --eval_ppl \
+ --eval_tasks piqa,arc_easy,hellaswag
+
+Load mixed-precision model in your own code:
+
+python
+from quantize.int_linear_real import load_mixed_precision_quantized_model
+model, tokenizer = load_mixed_precision_quantized_model("./output/mpq_adaptive/model")
+
+All changes are backward compatible - uniform quantized models will still load with the
+original function! 🚀
