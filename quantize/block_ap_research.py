@@ -649,12 +649,21 @@ def block_ap(
                         loss =  reconstruction_loss
 
                     if not math.isfinite(loss.item()):
-                        logger.info("Loss is NAN, stopping training")
+                        logger.info(f"❌ NaN/Inf detected! Block {block_index}, Epoch {epoch}")
+                        logger.info(f"   Loss: {loss.item()}, Bits: {layer_wbits}, LR: {layer_quant_lr:.2e}")
+                        logger.info("   This may indicate:")
+                        logger.info("   1. Learning rate too high for this bit-width")
+                        logger.info("   2. Numerical instability in low-bit quantization")
+                        logger.info("   3. Try: Lower LR or increase bit-width for this layer")
                         pdb.set_trace()
                     loss_list.append(reconstruction_loss.detach().cpu())
                     optimizer.zero_grad()
                     norm = loss_scaler(loss, optimizer,parameters=trainable_parameters(qlayer)).cpu()
                     norm_list.append(norm.data)
+                    
+                    # Monitor gradient explosion
+                    if norm.item() > 100:
+                        logger.warning(f"⚠️  High gradient norm: {norm.item():.2f} (Block {block_index}, {layer_wbits}-bit)")
 
                     if layer_quant_lr > 0:
                         quant_scheduler.step()
@@ -681,7 +690,18 @@ def block_ap(
                 
                 epoch_losses.append(val_loss_mean.item())
                 
-                logger.info(f"[TRAINING] Block {block_index} Epoch {epoch}/{adaptive_epochs} | Train Loss: {loss_mean:.6f} | Val Loss: {val_loss_mean:.6f} | LR: {quant_scheduler.get_lr()[0]:.2e} | Time: {time.time()-start_time:.1f}s")
+                # Check for loss explosion
+                if epoch > 0 and val_loss_mean > epoch_losses[-2] * 5:
+                    logger.warning(f"⚠️  Loss explosion detected! Val loss jumped from {epoch_losses[-2]:.6f} to {val_loss_mean:.6f}")
+                    logger.warning(f"   Consider: Lower LR or stop training this layer")
+                
+                # Color-coded logging
+                if val_loss_mean < best_val_loss:
+                    status = "✅"  # Improving
+                else:
+                    status = "⚠️ "  # Not improving
+                
+                logger.info(f"[TRAINING] {status} Block {block_index} Epoch {epoch}/{adaptive_epochs} | Train Loss: {loss_mean:.6f} | Val Loss: {val_loss_mean:.6f} | Grad Norm: {norm_mean:.2f} | LR: {quant_scheduler.get_lr()[0]:.2e} | Time: {time.time()-start_time:.1f}s")
                 
                 # Adaptive early stopping
                 if val_loss_mean < best_val_loss:

@@ -201,7 +201,7 @@ def load_quantized_model(model_path, wbits, group_size):
 def load_mixed_precision_quantized_model(model_path):
     """
     Load a mixed-precision quantized model where different layers may have different bit-widths.
-    This function reads the per-layer bit-widths and group sizes from the saved checkpoint.
+    This function reads the per-layer bit-widths and group sizes from layer_statistics.json.
     
     Args:
         model_path: Path to the saved mixed-precision quantized model
@@ -211,111 +211,75 @@ def load_mixed_precision_quantized_model(model_path):
         tokenizer: Loaded tokenizer
     """
     import os
+    import json
     print(f"Loading mixed-precision quantized model from {model_path}")
     
     tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=False)
     config = AutoConfig.from_pretrained(model_path)
     
-    # Load state dict to inspect per-layer configurations
-    state_dict_path = os.path.join(model_path, "pytorch_model.bin")
-    if not os.path.exists(state_dict_path):
-        # Try safetensors format
-        state_dict_path = os.path.join(model_path, "model.safetensors")
-        if os.path.exists(state_dict_path):
-            from safetensors.torch import load_file
-            state_dict = load_file(state_dict_path)
-        else:
-            # Try sharded checkpoints
-            from transformers.modeling_utils import load_sharded_checkpoint
-            state_dict, _ = load_sharded_checkpoint(model_path)
-    else:
-        state_dict = torch.load(state_dict_path, map_location='cpu')
+    # Load layer configurations from layer_statistics.json
+    stats_file = os.path.join(model_path, "layer_statistics.json")
+    if not os.path.exists(stats_file):
+        # Check parent directory
+        stats_file = os.path.join(os.path.dirname(model_path), "layer_statistics.json")
     
-    # Extract per-layer bit-widths and group sizes from state dict
+    if not os.path.exists(stats_file):
+        raise FileNotFoundError(
+            f"Cannot find layer_statistics.json in {model_path} or parent directory. "
+            "This file is required to load mixed-precision models correctly."
+        )
+    
+    print(f"Loading layer configurations from: {stats_file}")
+    with open(stats_file, 'r') as f:
+        stats_data = json.load(f)
+    
+    if 'layer_stats' not in stats_data:
+        raise ValueError("layer_statistics.json is missing 'layer_stats' field")
+    
+    # Extract per-layer configurations
     layer_configs = {}
-    for key in state_dict.keys():
-        # Look for qweight keys to identify quantized layers
-        # Format: model.layers.{layer_idx}.{submodule}.{linear_name}.qweight
-        if 'qweight' in key:
-            parts = key.split('.')
-            if 'layers' in parts:
-                layer_idx = int(parts[parts.index('layers') + 1])
-                if layer_idx not in layer_configs:
-                    layer_configs[layer_idx] = {}
-                
-                # Get the module path (e.g., "self_attn.q_proj")
-                module_path_parts = []
-                start_collecting = False
-                for i, part in enumerate(parts):
-                    if start_collecting and part not in ['qweight', 'scales', 'qzeros', 'g_idx', 'bias']:
-                        module_path_parts.append(part)
-                    if part == parts[parts.index('layers') + 1]:  # After layer index
-                        start_collecting = True
-                module_path = '.'.join(module_path_parts)
-                
-                # Infer bits from qweight shape
-                # qweight shape: (math.ceil(infeatures / (32 // bits)), outfeatures)
-                qweight_shape = state_dict[key].shape
-                scales_key = key.replace('qweight', 'scales')
-                if scales_key in state_dict:
-                    scales_shape = state_dict[scales_key].shape
-                    # scales shape: (math.ceil(infeatures / group_size), outfeatures)
-                    infeatures_groups = scales_shape[0]
-                    qweight_rows = qweight_shape[0]
-                    
-                    # Calculate bits: qweight_rows = math.ceil(infeatures / (32 // bits))
-                    # Try common bit-widths: 2, 3, 4, 5, 6, 8
-                    for candidate_bits in [2, 3, 4, 5, 6, 8]:
-                        # Calculate what infeatures would be
-                        expected_infeatures = qweight_rows * (32 // candidate_bits)
-                        # Check if this matches with scales
-                        for candidate_gs in [64, 128, 256]:
-                            if infeatures_groups == math.ceil(expected_infeatures / candidate_gs):
-                                layer_configs[layer_idx][module_path] = {
-                                    'bits': candidate_bits,
-                                    'group_size': candidate_gs,
-                                    'infeatures': expected_infeatures,
-                                    'outfeatures': qweight_shape[1]
-                                }
-                                break
-                        if module_path in layer_configs[layer_idx]:
-                            break
+    for layer_stat in stats_data['layer_stats']:
+        layer_idx = layer_stat['layer_idx']
+        layer_configs[layer_idx] = {
+            'bit_width': layer_stat['bit_width'],
+            'group_size': layer_stat['group_size'],
+            'sensitivity': layer_stat.get('sensitivity', 0.0)
+        }
     
-    print(f"Detected configurations for {len(layer_configs)} layers")
-    if layer_configs:
-        bits_summary = {}
-        for layer_idx, modules in layer_configs.items():
-            for module_path, cfg in modules.items():
-                bits = cfg['bits']
-                bits_summary[bits] = bits_summary.get(bits, 0) + 1
-        print(f"Bit-width distribution: {bits_summary}")
+    print(f"Loaded configurations for {len(layer_configs)} layers")
+    
+    # Show bit-width distribution
+    bit_widths = [cfg['bit_width'] for cfg in layer_configs.values()]
+    bits_summary = {}
+    for bits in bit_widths:
+        bits_summary[bits] = bits_summary.get(bits, 0) + 1
+    print(f"Bit-width distribution by layer: {bits_summary}")
+    print(f"Average bits per layer: {sum(bit_widths)/len(bit_widths):.2f}")
     
     # Create model with empty weights
     with init_empty_weights():
         model = AutoModelForCausalLM.from_config(config=config, torch_dtype=torch.float16, trust_remote_code=True)
     
-    # Replace Linear layers with QuantLinear using detected configurations
+    # Replace Linear layers with QuantLinear using layer configurations
     layers = model.model.layers
     for i in tqdm(range(len(layers)), desc="Replacing with QuantLinear"):
         layer = layers[i]
         named_linears = get_named_linears(layer, torch.nn.Linear)
         
+        # Get configuration for this layer
+        if i in layer_configs:
+            layer_wbits = layer_configs[i]['bit_width']
+            layer_group_size = layer_configs[i]['group_size']
+        else:
+            # Fallback to default if not found
+            layer_wbits = 4
+            layer_group_size = 128
+            print(f"  WARNING: Layer {i} config not found, using default {layer_wbits}-bit")
+        
         for name, module in named_linears.items():
-            # Get configuration for this specific layer and module
-            if i in layer_configs and name in layer_configs[i]:
-                cfg = layer_configs[i][name]
-                wbits = cfg['bits']
-                group_size = cfg['group_size']
-                print(f"  Layer {i}.{name}: {wbits}-bit, group_size={group_size}")
-            else:
-                # Fallback to default if not found (shouldn't happen for properly saved models)
-                wbits = 4
-                group_size = 128
-                print(f"  Layer {i}.{name}: Using default {wbits}-bit, group_size={group_size} (config not found)")
-            
             q_linear = QuantLinear(
-                wbits, 
-                group_size, 
+                layer_wbits, 
+                layer_group_size, 
                 module.in_features, 
                 module.out_features, 
                 not module.bias is None
@@ -331,7 +295,13 @@ def load_mixed_precision_quantized_model(model_path):
     device_map = infer_auto_device_map(model)
     print("Loading pre-computed quantized weights...")
     load_checkpoint_in_model(model, checkpoint=model_path, device_map=device_map, offload_state_dict=True)
-    print("Mixed-precision quantized weights loaded successfully!")
+    print("✅ Mixed-precision quantized model loaded successfully!")
+    
+    # Print summary
+    print(f"\nModel Summary:")
+    print(f"  Total layers: {len(layers)}")
+    print(f"  Bit-width distribution: {bits_summary}")
+    print(f"  Average bits: {sum(bit_widths)/len(bit_widths):.2f}")
     
     return model, tokenizer
 
