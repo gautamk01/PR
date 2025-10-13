@@ -41,7 +41,11 @@ def block_ap(
     if args.off_load_to_disk:
         logger.info("offload the training dataset to disk, saving CPU memory, but may slowdown the training due to additional I/O...")
     
-    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # GPU is required for this script
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA GPU is required for quantization training. No CUDA device detected.")
+    
+    dev = torch.device("cuda")
     use_cache = model.config.use_cache
     model.config.use_cache = False
     

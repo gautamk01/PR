@@ -79,15 +79,13 @@ def calculate_mixed_precision_config(sensitivity_scores, target_avg_bits=4.0, st
 
         for score in bit_scores:
             if score > quantile_80:  # Top 20% most sensitive
-                bits = 8
+                bits = 6  # Max 6-bit
             elif score > quantile_60:  # 60-80% sensitive
-                bits = 6
+                bits = 5
             elif score > quantile_30:  # 30-60% sensitive
                 bits = 4
-            elif score > quantile_15:  # 15-30% sensitive
-                bits = 3
-            else:  # Bottom 15% least sensitive
-                bits = 2
+            else:  # Bottom 30% least sensitive
+                bits = 3  # Minimum 3-bit (2-bit too destructive)
             bit_widths.append(bits)
 
         # IMPROVED: Greedy optimization to meet target budget
@@ -99,27 +97,37 @@ def calculate_mixed_precision_config(sensitivity_scores, target_avg_bits=4.0, st
         # More aggressive compression on low-sensitivity layers
         bit_widths = []
         for score in norm_scores:
-            if score > 0.9:
-                bits = 8
-            elif score > 0.7:
-                bits = 6
+            if score > 0.8:
+                bits = 6  # Max 6-bit
+            elif score > 0.6:
+                bits = 5
             elif score > 0.4:
                 bits = 4
             else:
-                bits = 2  # Aggressive 2-bit for low sensitivity
+                bits = 3  # Minimum 3-bit (2-bit too destructive for LLMs)
             bit_widths.append(bits)
+
+        # Optimize to meet target budget
+        bit_widths = _optimize_bit_budget_greedy(
+            bit_widths, sensitivity_scores.cpu().numpy(), target_avg_bits
+        )
 
     elif strategy == 'conservative':
         # More conservative, keep most layers at higher bits
         bit_widths = []
         for score in norm_scores:
             if score > 0.7:
-                bits = 8
+                bits = 6  # Max 6-bit
             elif score > 0.4:
-                bits = 6
+                bits = 5
             else:
                 bits = 4  # Minimum 4-bit
             bit_widths.append(bits)
+
+        # Optimize to meet target budget
+        bit_widths = _optimize_bit_budget_greedy(
+            bit_widths, sensitivity_scores.cpu().numpy(), target_avg_bits
+        )
 
     # Calculate adaptive group sizes (smaller for sensitive layers)
     group_sizes = []
@@ -157,15 +165,16 @@ def _optimize_bit_budget_greedy(initial_bits, sensitivity, target_avg):
     max_iterations = len(bits) * 5
     iteration = 0
 
-    # Hardware constraint: 2, 3, 4, 5, 6, 8 bits supported
-    SUPPORTED_BITS = [2, 3, 4, 5, 6, 8]
+    # Hardware constraint: 3, 4, 5, 6 bits supported (2-bit removed - too destructive for LLMs)
+    SUPPORTED_BITS = [3, 4, 5, 6]
+    MIN_BITS = 3  # Minimum 3-bit to preserve model quality
     
     while abs(current_avg - target_avg) > 0.05 and iteration < max_iterations:
         if current_avg > target_avg:
             # Reduce bits from least sensitive high-bit layers
             # Metric: sensitivity per bit (efficiency)
             candidates = [(i, bits[i], sensitivity[i] / bits[i])
-                         for i in range(len(bits)) if bits[i] > 2]
+                         for i in range(len(bits)) if bits[i] > MIN_BITS]
             if not candidates:
                 break
             candidates.sort(key=lambda x: x[2])  # Sort by efficiency (ascending)
@@ -179,7 +188,7 @@ def _optimize_bit_budget_greedy(initial_bits, sensitivity, target_avg):
             # Add bits to most sensitive low-bit layers
             # Metric: sensitivity per (bits + 1) (marginal benefit)
             candidates = [(i, bits[i], sensitivity[i] / (bits[i] + 1))
-                         for i in range(len(bits)) if bits[i] < 8]
+                         for i in range(len(bits)) if bits[i] < 6]
             if not candidates:
                 break
             candidates.sort(key=lambda x: -x[2])  # Sort by marginal benefit (descending)
@@ -658,12 +667,14 @@ def block_ap(
                         pdb.set_trace()
                     loss_list.append(reconstruction_loss.detach().cpu())
                     optimizer.zero_grad()
-                    norm = loss_scaler(loss, optimizer,parameters=trainable_parameters(qlayer)).cpu()
+                    norm = loss_scaler(loss, optimizer, clip_grad=args.clip_grad, parameters=trainable_parameters(qlayer)).cpu()
                     norm_list.append(norm.data)
                     
                     # Monitor gradient explosion
-                    if norm.item() > 100:
+                    if norm.item() > 10:
                         logger.warning(f"⚠️  High gradient norm: {norm.item():.2f} (Block {block_index}, {layer_wbits}-bit)")
+                        if norm.item() > 50:
+                            logger.error(f"❌ CRITICAL: Gradient norm {norm.item():.2f} exceeds safe threshold!")
 
                     if layer_quant_lr > 0:
                         quant_scheduler.step()

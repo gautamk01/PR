@@ -122,6 +122,10 @@ def main():
         model, tokenizer = load_quantized_model(args.resume_quant,args.wbits, args.group_size)
         logger.info(f"memory footprint after loading quantized model: {torch.cuda.max_memory_allocated('cuda') / 1024**3:.2f}GiB")
     else:
+        # GPU is required for quantization training
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA GPU is required for quantization training. No CUDA device detected.")
+        
         # load fp quantized model
         config = AutoConfig.from_pretrained(args.model)
         tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=False,legacy=False)
